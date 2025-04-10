@@ -501,9 +501,10 @@ async def process_ai_response(sender_id: str, user_message: str):
                             "webview": "full"
                         },
                         {
-                            "type": "postback",
-                            "title": "구매하기",
-                            "payload": f"BUY::{product_code}"
+                            "type": "url",
+                            "caption": "구매하기",
+                            "url": f"{MANYCHAT_HOOK_BASE_URL}?sender_id={sender_id}&product_code={product_code}",
+                            "webview": "compact"
                             
                         }
                     ]
@@ -893,7 +894,7 @@ def set_custom_field(subscriber_id: str, field_value: str):
         print(f":x: Custom Field 저장 실패: {response.status_code}, {response.text}")
 
 
-@app.post("/product-select")
+@app.get("/product-select")
 async def handle_product_selection(sender_id: str, product_code: str):
     """
     구매하기 버튼 클릭 시 호출되는 핸들러 (웹/포스트백 공통)
@@ -923,7 +924,7 @@ async def handle_product_selection(sender_id: str, product_code: str):
         set_custom_field(sender_id, info)
 
         # ✅ Messenger 메시지 전송
-        await send_message(sender_id, [{"type": "text", "text": info}])
+        send_message(sender_id, [{"type": "text", "text": info}])
         print(f"✅ Messenger에 상품 정보 전송 완료 (상품코드: {product_code})")
 
         return {
