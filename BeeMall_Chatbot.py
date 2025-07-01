@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union, List
 from urllib.parse import quote
 import math
+import random
 
 import numpy as np
 import pandas as pd
@@ -29,7 +30,7 @@ from langchain_community.chat_message_histories import (
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings, OpenAI
 from pydantic import BaseModel
 
 from pymilvus import (
@@ -37,6 +38,9 @@ from pymilvus import (
     FieldSchema, CollectionSchema,
     DataType, Collection
 )
+from langdetect import detect
+from openai import OpenAI as OpenAIClient      # 공식 OpenAI 클라이언트
+
 
 executor = ThreadPoolExecutor()
 
@@ -50,7 +54,18 @@ MANYCHAT_API_KEY = os.getenv('MANYCHAT_API_KEY')
 key = os.getenv("MANYCHAT_API_KEY")
 if isinstance(key, str) and "\x3a" in key:
     key = key.replace("\x3a", ":")
+LLM_MODEL  = "gpt-4.1-mini"
+EMB_MODEL  = "text-embedding-3-small"
 
+CSV_PATH     = "카테고리목록.csv"     # '카테고리목록' 컬럼이 있는 CSV
+# “카테고리” 목록 로드 (엑셀/CSV)
+df_categories = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+categories    = df_categories['카테고리목록'].dropna().unique().tolist()
+
+# 클라이언트 및 래퍼
+client    = OpenAIClient(api_key=API_KEY)
+llm       = OpenAI(api_key=API_KEY, model=LLM_MODEL, temperature=0)
+embedder  = OpenAIEmbeddings(api_key=API_KEY, model=EMB_MODEL)    # ← embedder 정의 추가
 
 
 # API_URL = os.getenv("API_URL", "").rstrip("/")  # 예: http://114.110.135.96:8011
@@ -82,14 +97,12 @@ collection = Collection(name=collection_name)
 emb_model = OpenAIEmbeddings(
     model="text-embedding-3-small",
     openai_api_key=os.getenv("OPENAI_API_KEY")
-
-# 💡 저장된 벡터 수 확인
 )
+# 💡 저장된 벡터 수 확인
 print(f"\n📊 저장된 엔트리 수: {collection.num_entities}")
 # ────────────────────────────────────────────────────────────────────────
 
 
-EMBEDDING_MODEL = "text-embedding-3-small"
 
 def get_redis():
     return redis.Redis.from_url(REDIS_URL)
@@ -134,20 +147,6 @@ async def measure_response_time(request: Request, call_next):
 # ✅ Jinja2 템플릿 설정
 templates = Jinja2Templates(directory="templates")
 
-'''# ✅ Redis 기반 메시지 기록 관리 함수
-def get_message_history(session_id: str) -> RedisChatMessageHistory:
-    """
-    Redis를 사용하여 메시지 기록을 관리합니다.
-    :param session_id: 사용자의 고유 세션 ID
-    :return: RedisChatMessageHistory 객체
-    """
-    try:
-        history = RedisChatMessageHistory(session_id=session_id, url=REDIS_URL)
-        return history
-    except Exception as e:
-        print(f"❌ Redis 연결 오류: {e}")
-        raise HTTPException(status_code=500, detail="Redis 연결에 문제가 발생했습니다.")'''
-
 # 요청 모델
 class QueryRequest(BaseModel):
     query: str
@@ -170,19 +169,49 @@ def minimal_clean_with_llm(latest_input: str, previous_inputs: List[str]) -> str
             raise ValueError("❌ [ERROR] OPENAI_API_KEY가 설정되지 않았습니다.")
         API_KEY = os.environ["OPENAI_API_KEY"]
 
-        llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
+        llm = ChatOpenAI(model="gpt-4.1-mini-2025-04-14", openai_api_key=API_KEY)
 
         context_message = "\n".join(previous_inputs)
 
         system_prompt = """
-            당신은 사용자의 과거 대화 맥락과 최신 입력을 기반으로 의미 있는 문장을 재구성하는 전문가입니다.\n
+            당신은 사용자의 과거 대화 기록과 최신 입력을 분석하여 문장에 맞게 의미 있는 검색 쿼리 문장을 재구성하는 전문가입니다.\n
+
+            System:
+        당신은 (1) 검색 엔진의 전처리를 담당하는 AI이자, (2) 쇼핑몰 검색 및 분류 전문가입니다.
+        어떤 언어로 입력이 되든 반드시 한국어로 문장 의미에 맞게 번역 먼저 합니다.
+        아래는 엑셀에서 로드된 **가능한 카테고리 목록**입니다.  
+        모든 예측은 이 목록 안에서만 이루어져야 합니다:
+        
+        {categories}
+        
+        다음 순서대로 응답하세요:
+        
+        1) **전처리 단계**  
+           - 사용자 원문(query)에서 오타를 바로잡고, 중복 표현을 제거한 뒤  
+           - 핵심 키워드와 의미만 남긴 깔끔한 검색 쿼리로 바꿔주세요.  
+           - 문장의 의미가 맞다면 문장 통으로 입력되어도 괜찮습니다.  
+        
+        2) **카테고리 예측 단계**  
+           - 전처리된 쿼리를 바탕으로 직관적으로 최상위 카테고리 하나를 예측하세요.
+        
+        3) **검색 결과 재정렬 단계**  
+           - 이미 Milvus 벡터 검색을 통해 얻은 TOP N 결과 리스트(search_results)를 입력받아  
+           - 각 결과의 메타데이터(id, 상품명, 카테고리, 가격, URL 등)를 활용해  
+           - 2번에서 예측한 카테고리와 매칭되거나 인접한 결과를 우선 정렬하세요.
+        
+        4) **출력 형식**은 반드시 아래와 같습니다:
+        
+        Raw Query: "<query>"  
+        Preprocessed Query: "<전처리된_쿼리>"  
+        Predicted Category: "<예측된_최상위_카테고리>" 
+
+        
             다음 기준을 철저히 따르세요:\n
             1. 이전 입력 중 **최신 입력과 의미가 충돌하는 문장**은 완전히 제거합니다.\n
             2. **충돌이 없는 이전 입력은 유지**하며, **최신 입력을 반영**해 전체 흐름을 자연스럽게 이어가세요.\n
             3. 문장의 단어 순서나 표현은 원문을 최대한 유지합니다.\n
             4. 오타, 띄어쓰기, 맞춤법만 교정하세요.\n
-            5. 어떤 언어로 입력되었든 **결과는 한국어 한 문장**으로 출력하세요.\n
-            6. 절대로 결과에 설명을 추가하지 마세요. **한 문장만 출력**합니다.\n
+            5. 절대로 결과에 설명을 추가하지 마세요. **한 문장만 출력**합니다.\n
             \n
             ---\n
             \n
@@ -195,20 +224,20 @@ def minimal_clean_with_llm(latest_input: str, previous_inputs: List[str]) -> str
             최신 입력:\n
             - 여름용으로 바꿔줘\n
             \n
-            → 결과: "강아지 옷 여름용 밝은 색으로 찾아줘"\n
+            → 결과: "강아지 옷 여름용 밝은 색"\n
             \n
             ---\n
             \n
             # 예시 2:\n
             이전 입력:\n
-            - 아이폰보여줘\n
+            - 아이폰\n
             - 프로 모델 이면 좋겠 어\n
-            - 실버 색상으로 봐줘\n
+            - 실버 색상으로\n
             \n
             최신 입력:\n
-            - 갤럭시로 바꿔줘\n
+            - 갤럭시로 \n
             \n
-            → 결과: "갤럭시 실버 색상으로 보여줘"\n
+            → 결과: "갤럭시 실버 색상"\n
             \n
             ---\n
             \n
@@ -223,7 +252,6 @@ def minimal_clean_with_llm(latest_input: str, previous_inputs: List[str]) -> str
             \n
             → 결과: "운동화 260mm 흰색 쿠션감 있는 걸로 찾아줘"\n
             """
-
         response = llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"이전 대화: {context_message}\n최신 입력: {latest_input}")
@@ -328,7 +356,7 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
                             "messages": [
                                 {
                                     "type": "text",
-                                    "text": f"🔄 Chat reset complete!\n💬 Enter a keyword and let the AI work its magic 🛍️."
+                                    "text": f"🔄 All cleaned up and ready to start~ \n💬 Enter a keyword and let the AI work its magic 🛍️."
                                 }
                             ]
                         },
@@ -443,7 +471,7 @@ async def process_ai_response(sender_id: str, user_message: str):
             send_message(sender_id, messages_data)
             print(f"✅ [Combined 메시지 전송 완료]: {combined_message_text}")
             print(f"버튼 생성용 product_code: {product_code}")
-            print("✅ 최종 messages_data:", json.dumps(messages_data, indent=2, ensure_ascii=False))
+            # print("✅ 최종 messages_data:", json.dumps(messages_data, indent=2, ensure_ascii=False))
 
         else:
             print(f"❌ AI 응답 오류 발생")
@@ -472,23 +500,24 @@ external_search_and_generate_response는 ManyChat 같은 외부 서비스와 연
 # ✅ 외부 검색 및 응답 생성 함수
 def external_search_and_generate_response(request: Union[QueryRequest, str], session_id: str = None) -> dict:
     try:
+        
         # ✅ 입력 쿼리 추출 및 타입 확인
         query = request if isinstance(request, str) else request.query
         print(f"🔍 사용자 검색어: {query}")
-
+        
         if not isinstance(query, str):
             raise TypeError(f"❌ [ERROR] 잘못된 query 타입: {type(query)}")
-
+    
         # ✅ 세션 초기화 명령 처리
         if query.lower() == "reset":
             if session_id:
                 clear_message_history(session_id)
             return {"message": f"세션 {session_id}의 대화 기록이 초기화되었습니다."}
-
+    
         # ✅ Redis 세션 기록 불러오기 및 최신 입력 저장
         session_history = get_session_history(session_id)
         session_history.add_user_message(query)
-
+    
         previous_queries = [msg.content for msg in session_history.messages if isinstance(msg, HumanMessage)]
         if query in previous_queries:
             previous_queries.remove(query)
@@ -500,48 +529,285 @@ def external_search_and_generate_response(request: Union[QueryRequest, str], ses
         UserMessage = minimal_clean_with_llm(query, previous_queries)
         print("\n🧾 [최종 정제된 문장] →", UserMessage)
         print("📚 [원본 전체 문맥] →", " | ".join(previous_queries + [query]))
+        
+        raw = detect(query)
+        lang_code = raw.lower().split("-")[0]   # "EN-us" → "en"
 
-        # ✅ 임베딩 벡터 생성
-        q_vec = np.array([emb_model.embed_query(UserMessage)], dtype=np.float32).tolist()
+        #가격을 이해하는 매핑
+        pattern = re.compile(r'(\d+)[^\d]*원\s*(이하|미만|이상|초과)')
+        m = pattern.search(query)
+        if m:
+            amount = int(m.group(1))
+            comp  = m.group(2)
+            # 부등호 매핑
+            op_map = {"이하":"<=", "미만":"<", "이상":">=", "초과":">"}
+            price_op = op_map[comp]
+            price_cond = f"market_price {price_op} {amount}"
+        else:
+            # 디폴트: 제한 없음
+            price_cond = None
+        
+        # 2) 언어 코드 → 사람말 매핑
+        lang_map = {
+            "ko": "한국어",
+            "en": "English",
+            "zh": "中文",
+            "ja": "日本語",
+            "vi": "Tiếng Việt",  # 베트남어
+            "th": "ไทย",        # 태국어
+        }
+        
+        target_lang = lang_map.get(lang_code, "English")
+        
+        print("[Debug] Detected language →", target_lang)
+        
+        # # LLM 전처리
+        # llm = OpenAI(
+        #     api_key=API_KEY,
+        #     model=LLM_MODEL,
+        #     temperature=0
+        # )
+        # system_prompt = (
+        #     f"""System:
+        # 당신은 (1) 검색 엔진의 전처리를 담당하는 AI이자, (2) 쇼핑몰 검색 및 분류 전문가입니다.
+        # 어떤 언어로 입력이 되든 반드시 한국어로 문장 의미에 맞게 번역 먼저 합니다.
+        # 아래는 엑셀에서 로드된 **가능한 카테고리 목록**입니다.  
+        # 모든 예측은 이 목록 안에서만 이루어져야 합니다:
+        
+        # {categories}
+        
+        # 다음 순서대로 응답하세요:
+        
+        # 1) **전처리 단계**  
+        #    - 사용자 원문(query)에서 오타를 바로잡고, 중복 표현을 제거한 뒤  
+        #    - 핵심 키워드와 의미만 남긴 깔끔한 검색 쿼리로 바꿔주세요.  
+        #    - 문장의 의미가 맞다면 문장 통으로 입력되어도 괜찮습니다.  
+        
+        # 2) **카테고리 예측 단계**  
+        #    - 전처리된 쿼리를 바탕으로 직관적으로 최상위 카테고리 하나를 예측하세요.
+        
+        # 3) **검색 결과 재정렬 단계**  
+        #    - 이미 Milvus 벡터 검색을 통해 얻은 TOP N 결과 리스트(search_results)를 입력받아  
+        #    - 각 결과의 메타데이터(id, 상품명, 카테고리, 가격, URL 등)를 활용해  
+        #    - 2번에서 예측한 카테고리와 매칭되거나 인접한 결과를 우선 정렬하세요.
+        
+        # 4) **출력 형식**은 반드시 아래와 같습니다:
+        
+        # Raw Query: "<query>"  
+        # Preprocessed Query: "<전처리된_쿼리>"  
+        # Predicted Category: "<예측된_최상위_카테고리>"  
+        #     """    
+        # )
 
-        # ✅ Milvus 벡터 검색 수행
-        milvus_results = collection.search(
-            data=q_vec,
-            anns_field="emb",
-            param={"metric_type": "L2", "params": {"nprobe": 10}},
-            limit=5,
-            output_fields=[
-                "product_code", "market_product_name", "market_price",
-                "shipping_fee", "image_url", "description",
-                "origin", "max_quantity"
-            ]
+        
+        
+        # resp = client.chat.completions.create(
+        #     model=LLM_MODEL,
+        #     messages=[
+        #         {"role": "system", "content": system_prompt},
+        #         {"role": "user",   "content": query}
+        #     ],
+        #     temperature=0
+        # )
+        # llm_response = resp.choices[0].message.content.strip()
+        llm_response = UserMessage
+        print("[Debug] LLM full response:\n", llm_response)  # ← 여기에!   
+        
+        #LLM 응답 파싱
+        lines = [l.strip() for l in llm_response.splitlines() if l.strip()]
+        preprocessed_query = next(
+            l.split(":",1)[1].strip().strip('"')
+            for l in lines if l.lower().startswith("preprocessed query")
         )
+        predicted_category = next(
+            l.split(":",1)[1].strip().strip('"')
+            for l in lines if l.lower().startswith("predicted category")
+        )
+        # ← 여기에 한 줄 추가
+        top_category = predicted_category.split(">")[0]
+        
+        print("[Debug] Preprocessed Query →", preprocessed_query)   # ← 여기에!
+        print("[Debug] top_category →", top_category)   # ← 여기에!
+        
+        #쿼리 임베딩 생성
+        q_vec = embedder.embed_query(preprocessed_query)
+        print(f"[Debug] q_vec length: {len(q_vec)}, sample: {q_vec[:5]}")  # ← 여기에!
+        
+        # ① Stage1: 직접 문자열 검색 (boolean search)
+        print("[Stage1] Direct name search 시작")
+        
+        # “남자용 향수” → ["남자", "향수"] 두 토큰으로 AND 검색
+        tokens = [t for t in re.sub(r"[용\s]+", " ", preprocessed_query).split() if t]
+        query_expr = " && ".join(f'market_product_name like "%{tok}%"'
+            for tok in tokens
+        )
+        
+        print("[Debug] Stage1 expr:", query_expr)
+        direct_hits = collection.query(
+            expr=query_expr,
+            output_fields = [
+            "product_code",
+            "category_code",
+            "category_name",
+            "market_product_name",
+            "market_price",
+            "shipping_fee",
+            "shipping_type",
+            "max_quantity",
+            "composite_options",
+            "image_url",
+            "manufacturer",
+            "model_name",
+            "origin",
+            "keywords",
+            "description",
+            "return_shipping_fee",
+        ]
+        )
+        print("[Stage1] Direct hits count:", len(direct_hits))
 
-        # ✅ Milvus 검색 결과 가공
-        results = []
+        # 전체 개수에서 50개를 랜덤 샘플링
+        n = 50
+        if len(direct_hits) > n:
+            direct_hits = random.sample(direct_hits, n)
+        else:
+            direct_hits = direct_hits  # 매칭 결과가 50개 이하라면 전부 사용
+
+        for i, row in enumerate(direct_hits[:7], 1):
+            print(f"  [Stage1 샘플 {i}]: 코드={row['product_code']}, 이름={row['market_product_name']}")
+        
+        
+        print("\n[Stage2.5] 직접검색 results 구성 시작")  
+        raw_candidates = []
+        for row in direct_hits:
+            # e = hit.entity
+            # 본문 미리보기 링크
+            try:
+                html_raw = row.get("description", "") or ""
+                html_cleaned = clean_html_content(html_raw)
+                if isinstance(html_raw, bytes):
+                    html_raw = html_raw.decode("cp949")
+                encoded_html = base64.b64encode(
+                    html_cleaned.encode("utf-8", errors="ignore")
+                ).decode("utf-8")
+                safe_html = urllib.parse.quote_plus(encoded_html)
+                preview_url = f"{API_URL}/preview?html={safe_html}"
+            except Exception as err:
+                print(f"⚠️ 본문 처리 오류: {err}")
+                preview_url = "https://naver.com"
+    
+            # 상품링크(fallback)
+            product_link = row.get("product_link", "")
+            if not product_link or product_link in ["링크 없음", "#", None]:
+                product_link = preview_url
+    
+            # 옵션 파싱
+            option_raw = str(row.get("composite_options", "")).strip()
+            option_display = "없음"
+            if option_raw.lower() not in ["", "nan"]:
+                parsed = []
+                for line in option_raw.splitlines():
+                    try:
+                        name, extra, _ = line.split(",")
+                        extra = int(float(extra))
+                        parsed.append(
+                            f"{name.strip()}{f' (＋{extra:,}원)' if extra>0 else ''}"
+                        )
+                    except Exception:
+                        parsed.append(line.strip())
+                option_display = "\n".join(parsed)
+    
+            # 10개 한글 속성으로 딕셔너리 구성
+            result_info = {
+                "상품코드":     str(row.get("product_code", "없음")),
+                "제목":        row.get("market_product_name", "제목 없음"),
+                "가격":        convert_to_serializable(row.get("market_price", 0)),
+                "배송비":      convert_to_serializable(row.get("shipping_fee", 0)),
+                "이미지":      row.get("image_url", "이미지 없음"),
+                "원산지":      row.get("origin", "정보 없음"),
+                "상품링크":    product_link,
+                "옵션":        option_display,
+                "조합형옵션":  option_raw,
+                "최대구매수량": convert_to_serializable(row.get("max_quantity", 0)),
+            }
+            result_info_cleaned = {}
+            for k, v in result_info.items():
+                if isinstance(v, str):
+                    v = v.replace("\n", "").replace("\r", "").replace("\t", "")
+                result_info_cleaned[k] = v
+            raw_candidates.append(result_info_cleaned)
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
+        
+        # ② Stage2: 벡터 유사도 검색
+        expr = f'category_name like "%{top_category}%"'
+        milvus_results = collection.search(
+            data=[q_vec],
+            anns_field="emb",  # ← 벡터 저장된 필드 이름
+            param={"metric_type": "L2", "params": {"nprobe": 128}},   #유클리드 방식 
+            # param={"metric_type": "COSINE", "params": {"nprobe": 128}},   #코사인 방식
+            limit=50,
+            # expr=expr,                              # ← 이 줄 추가
+            output_fields = [
+            "product_code",
+            "category_code",
+            "category_name",
+            "market_product_name",
+            "market_price",
+            "shipping_fee",
+            "shipping_type",
+            "max_quantity",
+            "composite_options",
+            "image_url",
+            "manufacturer",
+            "model_name",
+            "origin",
+            "keywords",
+            "description",
+            "return_shipping_fee",
+        ]
+        )
+        print(f"[Stage2] Vector hits count: {len(milvus_results[0])}")
+
+        #  results 생성
+        print("\n[Stage2.5] 벡터 esults 구성 시작")  
+        # raw_candidates = []
         for hits in milvus_results:
             for hit in hits:
+                e = hit.entity
+                # 본문 미리보기 링크
                 try:
-                    e = hit.entity
-
-                    # ▶ 본문 → 미리보기 링크 생성
                     html_raw = e.get("description", "") or ""
                     html_cleaned = clean_html_content(html_raw)
                     if isinstance(html_raw, bytes):
                         html_raw = html_raw.decode("cp949")
-                    encoded_html = base64.b64encode(html_cleaned.encode("utf-8", errors="ignore")).decode("utf-8")
+                    encoded_html = base64.b64encode(
+                        html_cleaned.encode("utf-8", errors="ignore")
+                    ).decode("utf-8")
                     safe_html = urllib.parse.quote_plus(encoded_html)
                     preview_url = f"{API_URL}/preview?html={safe_html}"
                 except Exception as err:
-                    print(f"⚠️ 본문 처리 중 오류: {err}")
+                    print(f"⚠️ 본문 처리 오류: {err}")
                     preview_url = "https://naver.com"
-
-                # ▶ 상품링크 결정
+        
+                # 상품링크(fallback)
                 product_link = e.get("product_link", "")
                 if not product_link or product_link in ["링크 없음", "#", None]:
                     product_link = preview_url
-
-                # ▶ 옵션 정보 파싱
+        
+                # 옵션 파싱
                 option_raw = str(e.get("composite_options", "")).strip()
                 option_display = "없음"
                 if option_raw.lower() not in ["", "nan"]:
@@ -550,64 +816,89 @@ def external_search_and_generate_response(request: Union[QueryRequest, str], ses
                         try:
                             name, extra, _ = line.split(",")
                             extra = int(float(extra))
-                            parsed.append(f"{name.strip()} {f'(＋{extra:,}원)' if extra>0 else ''}".strip())
+                            parsed.append(
+                                f"{name.strip()}{f' (＋{extra:,}원)' if extra>0 else ''}"
+                            )
                         except Exception:
                             parsed.append(line.strip())
                     option_display = "\n".join(parsed)
-
-                # ▶ 결과 정리
+        
+                # 10개 한글 속성으로 딕셔너리 구성
                 result_info = {
                     "상품코드":     str(e.get("product_code", "없음")),
-                    "제목":         e.get("market_product_name", "제목 없음"),
-                    "가격":         convert_to_serializable(e.get("market_price", 0)),
-                    "배송비":       convert_to_serializable(e.get("shipping_fee", 0)),
-                    "이미지":       e.get("image_url", "이미지 없음"),
-                    "원산지":       e.get("origin", "정보 없음"),
-                    "상품링크":     product_link,
-                    "옵션":         option_display,
-                    "조합형옵션":   option_raw,
-                    "최대구매수량": convert_to_serializable(e.get("max_quantity", 0))
+                    "제목":        e.get("market_product_name", "제목 없음"),
+                    "가격":        convert_to_serializable(e.get("market_price", 0)),
+                    "배송비":      convert_to_serializable(e.get("shipping_fee", 0)),
+                    "이미지":      e.get("image_url", "이미지 없음"),
+                    "원산지":      e.get("origin", "정보 없음"),
+                    "상품링크":    product_link,
+                    "옵션":        option_display,
+                    "조합형옵션":  option_raw,
+                    "최대구매수량": convert_to_serializable(e.get("max_quantity", 0)),
                 }
-                results.append(result_info)
-                PRODUCT_CACHE[result_info["상품코드"]] = result_info
+                result_info_cleaned = {}
+                for k, v in result_info.items():
+                    if isinstance(v, str):
+                        v = v.replace("\n", "").replace("\r", "").replace("\t", "")
+                    result_info_cleaned[k] = v
+                raw_candidates.append(result_info_cleaned)
+        
+                # 캐시에 안전 저장
+                product_code = result_info_cleaned.get("상품코드")
 
 
+
+        
         message_history = [
             {"type": type(msg).__name__, "content": msg.content if hasattr(msg, "content") else str(msg)}
             for msg in session_history.messages
         ]
+        
 
-        raw_results_json = json.dumps(results[:5], ensure_ascii=False)
+    
+            
+        # 개수 및 샘플 확인
+        print(f"[Stage2.5] raw_candidates count: {len(raw_candidates)}")
+        
+        # ④ Stage4: LLM으로 최종 5개 선택
+        print("[Stage4] LLM 최종 후보 선정 시작")
+        candidate_list = "\n".join(
+            f"{i+1}. {info['제목']} [{info.get('카테고리', predicted_category)}]"
+            for i, info in enumerate(raw_candidates)
+        )
+
+        raw_results_json = json.dumps(candidate_list[:5], ensure_ascii=False)
         raw_history_json = json.dumps(message_history, ensure_ascii=False)
         escaped_results = raw_results_json.replace("{", "{{").replace("}", "}}")
         escaped_history = raw_history_json.replace("{", "{{").replace("}", "}}")
 
+        
+        print("[Stage4] LLM에 넘길 후보 리스트:\n", candidate_list[:], "...")  # 앞부분만 출력
+        print(f"target_lang 1번째 ----- {target_lang}")
         # ✅ LangChain 기반 프롬프트 및 LLM 실행 설정
-        API_KEY = os.environ.get("OPENAI_API_KEY")
-        llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
+        llm = ChatOpenAI(model="gpt-4.1-mini", openai_api_key=API_KEY)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """
-        당신은 쇼핑몰 챗봇으로, 친절하고 인간적인 대화를 통해 고객의 쇼핑 경험을 돕습니다.
-        사용자의 언어에 맞게 번역해서 답변하세요(예시: 한국어->한국어, 영어->영어, 베트남어->베트남어 등)
+            ("system", f"""
+            **⚠️ 답변은 반드시 "{target_lang}" 언어로 답변 해주세요.**
+            System: 당신은 쇼핑몰에 대해서 전문지식을 갖춘 직원 입니다. 최대한 친근하고 정중한 말투로 상품을 물음표로 권유합니다.
+            User Query: "{query}"
+            예측된 카테고리: "{predicted_category}"
+            아래 후보들은 모두 이 카테고리에 속합니다. 
+            후보리스트 : {candidate_list}.
+            반드시 후보리스트만 보고 사용자에게 후보리스트 내용정보 안에서만 상품을 추천하는 질문을 만들어서 물음표로 권유합니다.
+            입력된 모든 상품을 가지고 카테고리, 제목등 찾은 결과의 내용들을 종합해서 넣어서 원하는 상품을 없다는면 원하는 상품을 좁혀나가는 질문을 반드시 400자로 생성 합니다.
+            그리고 나서 이 중 사용자 의도에 가장 적합한 5개 항목의 번호만 JSON 배열 형태로 반환하세요:
+            가격에 원이라는게 들어 가면 가격을 물어보는거라 예를들어 20000원 이하 물품을 찾아줘 하면 가격 : 항목에서 20000 이하 물품만 보이고 이상이면 이상 물품만 보여주세요.
 
-        목표:
-        - 사용자의 요구를 이해하고 대화의 맥락을 반영하여 적합한 상품을 추천합니다.
-
-        작동 방식:
-        - 대화 이력을 참고해 문맥을 파악하고 사용자의 요청에 맞는 상품을 연결합니다.
-        - 필요한 경우 후속 질문으로 사용자의 요구를 구체화합니다.
-
-        주의사항:
-        - 아래 검색 결과는 LLM 내부 참고용입니다.
-        - 상품을 나열하거나 직접 출력하지 마세요.
-        - 키워드 요약이나 후속 질문을 위한 참고용으로만 활용하세요.
-        """),
+            candidate_list 상품 번호는 너만 보기만 하고 LLM답변으로 출력은 절대 하지마.
+         
+         """),
             MessagesPlaceholder(variable_name="message_history"),
             ("system", f"[검색 결과 - 내부 참고용 JSON]\n{escaped_results}"),
             ("system", f"[이전 대화 내용]\n{escaped_history}"),
             ("human", query)
-        ])
-
+        ]) 
+    
         runnable = prompt | llm
         with_message_history = RunnableWithMessageHistory(
             runnable,
@@ -615,35 +906,94 @@ def external_search_and_generate_response(request: Union[QueryRequest, str], ses
             input_messages_key="input",
             history_messages_key="message_history",
         )
-
+        
         # ✅ 응답 생성 및 시간 측정
         start_response = time.time()
-        response = with_message_history.invoke(
-            {"input": query},
+        # invoke 호출 직전
+        print("▶️ [LLM 호출 시작] with_message_history.invoke() 직전")
+        print(f"   args = {{'input': {query!r}, 'query': {query!r}, "
+              f"'predicted_category': {predicted_category!r}, 'target_lang': {target_lang!r}}}")
+
+
+        print(f"target_lang 2번째 ----- {target_lang}")
+
+        resp2 = with_message_history.invoke(
+            {
+              "input": query,                       # MessagesPlaceholder
+              "query": query,                       # "{query}" 에 매핑
+              "predicted_category": predicted_category,
+              "target_lang": target_lang
+            },
             config={"configurable": {"session_id": session_id}}
         )
+        
         print(f"📊 [LLM 응답 시간] {time.time() - start_response:.2f}초")
-        print("🤖 응답 결과:", response.content)
+        print("🤖 응답 결과:", resp2.content)
+
+        selection = resp2.content.strip()
+
+        print("[Stage4] Raw LLM selection:", selection)
+        
+        # 1) ```json … ``` 마크다운 제거
+        clean = re.sub(r'```.*?\n', '', selection).replace('```','').strip()
+        print("[Stage4] Cleaned selection:", clean)
+        
+        match = re.search(r'\[(?:\s*\d+\s*,?)+\s*\]', clean)
+        if match:
+            arr_text = match.group(0)
+            try:
+                chosen_idxs = json.loads(arr_text)
+            except json.JSONDecodeError:
+                chosen_idxs = []
+        else:
+            chosen_idxs = []
+        max_n = len(raw_candidates)
+        valid_idxs = [i for i in chosen_idxs if 1 <= i <= max_n]
+        if len(valid_idxs) < len(chosen_idxs):
+            print(f"⚠️ 잘못된 인덱스 제거됨: {set(chosen_idxs) - set(valid_idxs)}")
+        if not valid_idxs:
+            print("⚠️ 유효 인덱스 없음, 상위 5개로 Fallback")
+            valid_idxs = list(range(1, min(6, max_n+1)))
+        chosen_idxs = valid_idxs
+        print("[Stage4] Final chosen indices:", chosen_idxs)
+        # ── 여기까지 추가 ──
+        
+        # 3) 최종 결과 매핑 → raw_candidates 기준
+        final_results = [ raw_candidates[i-1] for i in chosen_idxs ]   #10개 제한 시키기
+        print("\n✅ 최종 추천 5개 상품:")
+        
+        # ★ 여기에 10개 이상이면 앞 10개만 사용하도록 자르기 ★
+        if len(final_results) > 10:
+            final_results = final_results[:10]
+        
+        for idx, info in enumerate(final_results, start=1):
+            PRODUCT_CACHE[info["상품코드"]] = info
+            
+            print(f"\n[{idx}] {info['제목']}")
+            print(f"   상품코드   : {info['상품코드']}")
+            print(f"   가격       : {info['가격']}원")
+            print(f"   배송비     : {info['배송비']}원")
+            print(f"   이미지     : {info['이미지']}")
+            print(f"   원산지     : {info['원산지']}")
+            print(f"   상품링크   : {info['상품링크']}")
+            print(f"   옵션       : {info['옵션']}")
+            print(f"   조합형옵션 : {info['조합형옵션']}")
+            print(f"   최대구매수량: {info['최대구매수량']}")
+        
+        # print(f"PRODUCT_CACHE {PRODUCT_CACHE}")
+
 
         # ✅ 최종 결과 반환 및 출력 로그
         result_payload = {
             "query": query,  # 사용자가 입력한 원본 쿼리
             "UserMessage": UserMessage,  # 정제된 쿼리
             "RawContext": previous_queries + [query],  # 전체 대화 맥락
-            "results": results,  # 검색 결과 리스트
-            "combined_message_text": response.content,  # LLM이 생성한 자연어 응답
+            "results": final_results,  # 검색 결과 리스트
+            "combined_message_text": resp2.content,  # LLM이 생성한 자연어 응답
             "message_history": message_history  # 전체 메시지 기록 (디버깅용)
         }
-        print("\n📦 반환 객체 요약")
-        print("query:", result_payload["query"])
-        print("UserMessage:", result_payload["UserMessage"])
-        print("RawContext:", result_payload["RawContext"])
-        print("combined_message_text:", result_payload["combined_message_text"])
-        print("results (count):", len(result_payload["results"]))
-        print("message_history (count):", len(result_payload["message_history"]))
-
         return result_payload
-
+    
     except Exception as e:
         print(f"❌ external_search_and_generate_response 오류: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -786,10 +1136,12 @@ def handle_product_selection(data: Product_Selections):
         price = int(float(product.get("가격", 0) or 0))
         shipping = int(float(product.get("배송비", 0) or 0))
         option_raw = product.get("조합형옵션", "").strip()
+        print(f"\n🐞 [DEBUG] option_raw: {option_raw}\n")
 
         option_display = "없음"
         if option_raw and option_raw.lower() != "nan":
             option_lines = option_raw.splitlines()
+            print(f"\n🐞 [DEBUG] option_lines: {option_lines}\n")
             parsed_options = []
             for line in option_lines:
                 try:
@@ -805,12 +1157,12 @@ def handle_product_selection(data: Product_Selections):
         
         # ✅ Manychat Field 업데이트
         updater = ManychatFieldUpdater(sender_id, MANYCHAT_API_KEY)
-        updater.set_unique_code("12886380", product.get('상품코드'))
-        updater.set_product_name("12886273", product.get('제목'))
-        updater.set_option("12886363", option_display)
-        updater.set_price("12890668", price)
-        updater.set_shipping("12890670", shipping)
-        updater.set_product_max_quantity("12922068", product.get('최대구매수량'))
+        updater.set_unique_code("13117409", product.get('상품코드'))
+        updater.set_product_name("13117396", product.get('제목'))
+        updater.set_option("12953235", option_display)
+        updater.set_price("13117479", price)
+        updater.set_shipping("13117482", shipping)
+        updater.set_product_max_quantity("13117481", product.get('최대구매수량'))
 
         # ✅ 외부 Flow 트리거 (비동기처럼 요청 보내기)
         headers = {
@@ -819,7 +1171,7 @@ def handle_product_selection(data: Product_Selections):
         }
         flow_payload = {
             "subscriber_id": sender_id,
-            "flow_ns": "content20250417015933_369132"
+            "flow_ns": "content20250604080355_172315"
         }
         try:
             res = requests.post(
@@ -908,7 +1260,7 @@ def handle_option_request(data: Option_Selections):
         }
         flow_payload = {
             "subscriber_id": sender_id,
-            "flow_ns": "content20250424050612_308842"
+            "flow_ns": "content20250605003906_502539"
         }
         res = requests.post(
             "https://api.manychat.com/fb/sending/sendFlow",
@@ -1028,8 +1380,8 @@ def handle_option_selection(payload: dict):
             extra_price = 0
 
     updater = ManychatFieldUpdater(sender_id, MANYCHAT_API_KEY)
-    updater.set_product_selection_option("12904981", selected_option)
-    updater.set_extra_price("12911810", extra_price)
+    updater.set_product_selection_option("13117397", selected_option)
+    updater.set_extra_price("13117480", extra_price)
 
     # ✅ 옵션 저장 후 Flow로 이동시키기
     headers = {
@@ -1038,7 +1390,7 @@ def handle_option_selection(payload: dict):
     }
     flow_payload = {
         "subscriber_id": sender_id,
-        "flow_ns": "content20250424050612_308842"
+        "flow_ns": "content20250605003906_502539"
     }
     res2 = requests.post(
         "https://api.manychat.com/fb/sending/sendFlow",
@@ -1053,7 +1405,7 @@ def handle_option_selection(payload: dict):
             "messages": [
                 {
                     "type": "text",
-                    "text": f"✅ Option selected: {selected_option} (Extra: {extra_price:,})원)"
+                    "text": f"Option selected: {selected_option} (Extra: {extra_price:,})원)"
                 }
             ]
         }
@@ -1062,6 +1414,7 @@ def handle_option_selection(payload: dict):
 class QuantityInput(BaseModel):
     sender_id: str
     product_quantity: int
+    product_code: str
 
 
 def safe_int(val):
@@ -1074,45 +1427,45 @@ def safe_int(val):
 @app.post("/calculate_payment")
 def calculate_payment(data: QuantityInput):
     try:
+        # 1) product_code로 바로 조회
+        product = PRODUCT_CACHE.get(data.product_code)
+        if not product:
+            raise ValueError(f"❌ 상품코드 {data.product_code} 정보가 없습니다.")
+
         sender_id = data.sender_id
         quantity = data.product_quantity
+        if not sender_id:
+            raise ValueError("❌ sender_id 누락됨")
 
-        if not sender_id or quantity is None:
-            raise ValueError("❌ sender_id 또는 product_quantity 누락됨")
+        # 2) 기본 정보 추출
+        price        = safe_int(product.get("가격", 0))
+        extra_price  = safe_int(product.get("추가금액", 0)) if "추가금액" in product else 0
+        shipping     = safe_int(product.get("배송비", 0))
+        max_quantity = safe_int(product.get("최대구매수량", 0))
 
-        # 🔍 캐시에서 상품 정보 불러오기
-        product = None
-        for p in PRODUCT_CACHE.values():
-            if p.get("sender_id") == sender_id:
-                product = p
-                break
-
-        if not product:
-            raise ValueError("❌ 해당 유저의 상품 정보가 존재하지 않습니다.")
-
-        # 🔢 기본 정보 추출
-        price = safe_int(float(product.get("가격", 0)))
-        extra_price = safe_int(float(product.get("추가금액", 0))) if "추가금액" in product else 0
-        shipping = safe_int(float(product.get("배송비", 0)))
-        max_quantity = safe_int(float(product.get("최대구매수량", 0)))
-
-        # ✅ 총 가격 계산
+        # 3) 총 가격 계산
         total_price = (price + extra_price) * quantity
         if max_quantity == 0:
             shipping_cost = shipping
         else:
             shipping_cost = shipping * math.ceil(quantity / max_quantity)
-
         total_price += shipping_cost
 
         # ✅ 천 단위 구분을 위한 포맷팅
         formatted_total_price = "{:,}".format(total_price)
-        print(f"✅ 계산 완료 → 총금액: {formatted_total_price}원 (수량: {quantity}, 배송비: {shipping_cost:,}원)")
+        print(
+            f"✅ 계산 완료 → 총금액: {formatted_total_price}원\n"
+            f" 상품금액: {price:,}원,\n"
+            f" 추가금액: {extra_price:,}원,\n"
+            f" 수량: {quantity},\n"
+            f" 배송비: {shipping_cost:,}원,\n"
+            f" 묶음배송수량: {max_quantity}"
+        )
 
         # ✅ Manychat 필드 업데이트
         updater = ManychatFieldUpdater(sender_id, MANYCHAT_API_KEY)
-        updater.set_quantity("12911653", quantity)  # Product_quantity 필드 ID
-        updater.set_total_price("13013393", formatted_total_price)  # Total_price 필드 ID - 포맷팅된 값으로 저장
+        updater.set_quantity("13117398", quantity)  # Product_quantity 필드 ID
+        updater.set_total_price("13170342", formatted_total_price)  # Total_price 필드 ID - 포맷팅된 값으로 저장
 
         # ✅ ManyChat 다음 Flow로 이동
         headers = {
@@ -1121,7 +1474,7 @@ def calculate_payment(data: QuantityInput):
         }
         flow_payload = {
             "subscriber_id": sender_id,
-            "flow_ns": "content20250501040123_213607"
+            "flow_ns": "content20250605012240_150101"
         }
         res = requests.post(
             "https://api.manychat.com/fb/sending/sendFlow",
