@@ -4,268 +4,495 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FAISS 검색 API 테스트</title>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github.min.css">
+    <title>🛍️ ChatMall - AI 쇼핑 어시스턴트</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Arial', sans-serif;
-            background: linear-gradient(120deg, #f6f7f9, #dfe9f3);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
+            font-family: 'Noto Sans KR', sans-serif;
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            min-height: 100vh; display: flex; justify-content: center; align-items: center;
+            padding: 20px; position: relative; color: #334155;
         }
-
+        body::before {
+            content: '';
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background:
+                radial-gradient(circle at 20% 80%, rgba(120,119,198,0.03) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(255,119,198,0.03) 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, rgba(120,200,255,0.03) 0%, transparent 50%);
+            z-index: -1; pointer-events: none;
+        }
         .chat-container {
-            width: 90%;
-            max-width: 600px;
-            height: 90%;
-            background: #ffffff;
-            border-radius: 15px;
-            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
+            width: 100%; max-width: 900px; height: 85vh;
+            background: rgba(255,255,255,0.9); backdrop-filter: blur(20px);
+            border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.08), 0 0 0 1px rgba(255,255,255,0.1);
+            display: flex; flex-direction: column; overflow: hidden; position: relative;
+            border: 1px solid rgba(226,232,240,0.8);
         }
-
         .chat-header {
-            background: #4a90e2;
-            color: white;
-            text-align: center;
-            padding: 15px;
-            font-size: 20px;
-            font-weight: bold;
-            border-radius: 15px 15px 0 0;
+            background: linear-gradient(135deg,#ffffff 0%,#f8fafc 100%);
+            color: #475569; text-align: center; padding: 25px; font-size: 24px;
+            font-weight: 600; border-radius: 20px 20px 0 0;
+            border-bottom: 1px solid rgba(226,232,240,0.6);
+        }
+        .chat-header i {
+            margin-right: 12px; font-size: 26px; color: #3b82f6;
+            animation: bounce 3s infinite;
+        }
+        @keyframes bounce {
+            0%,20%,50%,80%,100%{transform:translateY(0);}
+            40%{transform:translateY(-5px);}
+            60%{transform:translateY(-3px);}
+        }
+        .chat-messages {
+            flex:1; padding:25px; overflow-y:auto; background:#f8fafc;
+            display:flex; flex-direction:column; gap:20px;
+        }
+        .chat-messages::-webkit-scrollbar { width:6px; }
+        .chat-messages::-webkit-scrollbar-track { background:rgba(226,232,240,0.3); border-radius:10px; }
+        .chat-messages::-webkit-scrollbar-thumb { background:linear-gradient(135deg,#cbd5e1,#94a3b8); border-radius:10px; }
+        .message {
+            padding:18px 22px; border-radius:16px; max-width:80%; font-size:15px;
+            line-height:1.6; word-wrap:break-word; position:relative;
+            animation:messageSlide 0.4s ease-out;
+        }
+        @keyframes messageSlide {
+            from{opacity:0;transform:translateY(15px);} to{opacity:1;transform:translateY(0);}
+        }
+        .user {
+            align-self:flex-end;
+            background:linear-gradient(135deg,#3b82f6 0%,#1d4ed8 100%);
+            color:white; box-shadow:0 4px 20px rgba(59,130,246,0.2);
+        }
+        .bot {
+            align-self:flex-start; background:#ffffff; color:#374151;
+            border:1px solid rgba(226,232,240,0.8); box-shadow:0 2px 12px rgba(0,0,0,0.04);
         }
 
-        .chat-messages {
-            flex: 1;
-            padding: 20px;
-            overflow-y: auto;
-            background: #f5f7fa;
+        /* ====== Slider Styles ====== */
+        .slider-container {
+          position: relative; width: 100%; height: 600px;
+          overflow: hidden; margin-top: 20px; height: auto;
+        }
+        .slides-wrapper {
+          display: flex; gap: 20px; transition: transform 0.3s ease;
+        }
+        .slider-btn {
+          position: absolute; top: 50%; transform: translateY(-50%);
+          background: rgba(0,0,0,0.3); border: none;
+          color: white; font-size: 24px; width: 36px; height: 36px;
+          border-radius: 50%; cursor: pointer; z-index: 10;
+        }
+        .slider-btn.prev { left: 10px; }
+        .slider-btn.next { right: 10px; }
+        /* ============================= */
+
+        .product-card {
+            background:#ffffff; border:1px solid rgba(226,232,240,0.6);
+            border-radius:16px; padding:20px; box-shadow:0 4px 20px rgba(0,0,0,0.04);
+            flex: 0 0 260px;
             display: flex;
             flex-direction: column;
-            gap: 10px;
         }
-
-        .message {
-            padding: 10px 15px;
-            border-radius: 20px;
-            max-width: 70%;
-            font-size: 16px;
+        .product-image-container {
+            width:100%; height:160px; margin-bottom:12px;
+            border-radius:12px; overflow:hidden;
+            background:linear-gradient(45deg,#f1f5f9,#e2e8f0);
         }
-
-        .user {
-            align-self: flex-end;
-            background: #4a90e2;
-            color: white;
+        .product-image {
+            width:100%; height:100%; object-fit:cover;
+            transition:transform 0.3s ease;
         }
-
-        .bot {
-            align-self: flex-start;
-            background: #e0e0e0;
-            color: black;
+        .product-image:hover { transform:scale(1.05); }
+        .product-image-placeholder {
+            display:flex; align-items:center; justify-content:center;
+            background:linear-gradient(45deg,#f8fafc,#e2e8f0);
+            color:#94a3b8; font-size:36px;
+        }
+        .product-title {
+            font-weight:600; font-size:14px; color:#1e293b;
+            margin-bottom:8px; line-height:1.4;
+        }
+        .badge {
+            padding:4px 8px; border-radius:12px; font-size:11px;
+            font-weight:500; display:inline-block;
+        }
+        .badge-category {
+            background:linear-gradient(135deg,#dbeafe,#bfdbfe);
+            color:#1e40af; margin-right:4px;
+        }
+        .badge-shipping {
+            background:linear-gradient(135deg,#dcfce7,#bbf7d0);
+            color:#166534;
+        }
+        .product-price {
+            font-size:16px; font-weight:700; color:#dc2626;
+            margin:8px 0; text-align:center;
+        }
+        .product-info {
+            font-size:12px; color:#64748b; margin:4px 0;
+            display:flex; align-items:center;
+        }
+        .product-info i { margin-right:4px; color:#3b82f6; }
+        .product-link {
+            display:block; width:100%; text-decoration:none;
+            text-align:center; padding:8px;
+            background:linear-gradient(135deg,#3b82f6 0%,#1d4ed8 100%);
+            color:white; border-radius:12px; margin-top:12px;
+            margin-top: auto;
+        }
+        .product-link:hover {
+            transform:translateY(-2px);
+            box-shadow:0 4px 16px rgba(59,130,246,0.3);
         }
 
         .chat-input {
-            display: flex;
-            border-top: 1px solid #ddd;
-            padding: 10px;
-            background: white;
+            display:flex; border-top:1px solid rgba(226,232,240,0.6);
+            padding:20px; background:#ffffff; gap:12px;
         }
-
+        .input-container { flex:1; position:relative; }
+        .input-container i {
+            position:absolute; left:16px; top:50%;
+            transform:translateY(-50%); color:#94a3b8;
+        }
         .chat-input input {
-            flex: 1;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 20px;
-            outline: none;
-            font-size: 16px;
+            width:100%; padding:12px 16px 12px 45px;
+            border:1px solid rgba(226,232,240,0.8);
+            border-radius:16px; outline:none; background:#f8fafc;
         }
-
-        .chat-input button {
-            padding: 10px 20px;
-            border: none;
-            background: #4a90e2;
-            color: white;
-            cursor: pointer;
-            border-radius: 20px;
-            margin-left: 10px;
-            font-size: 16px;
-            transition: background 0.3s;
+        .btn-primary {
+            background:linear-gradient(135deg,#3b82f6 0%,#1d4ed8 100%);
+            color:white; border:none; border-radius:16px; padding:12px 20px;
         }
-
-        .chat-input button:hover {
-            background: #357ab8;
+        .btn-secondary {
+            background:linear-gradient(135deg,#e2e8f0 0%,#cbd5e1 100%);
+            color:#475569; border:none; border-radius:16px; padding:12px 20px;
         }
-
-        .loading-spinner {
-            display: none;
-            margin: 0 auto;
-            border: 4px solid rgba(0, 0, 0, 0.2);
-            border-top: 4px solid #4a90e2;
-            border-radius: 50%;
-            width: 30px;
-            height: 30px;
-            animation: spin 1s linear infinite;
+        .btn-primary:disabled,
+        .btn-secondary:disabled {
+            background:#f1f5f9; color:#94a3b8; cursor:not-allowed;
         }
-
-        @keyframes spin {
-            0% {
-                transform: rotate(0deg);
-            }
-
-            100% {
-                transform: rotate(360deg);
-            }
+        .loading-spinner { display:none; margin:25px auto; text-align:center; }
+        .spinner {
+            width:40px; height:40px; border:3px solid rgba(59,130,246,0.1);
+            border-top:3px solid #3b82f6; border-radius:50%;
+            animation:spin 1s linear infinite; margin:0 auto 12px;
         }
-
-        #json-results {
-            background: #e8e8e8;
-            padding: 10px;
-            border-radius: 10px;
-            font-family: monospace;
-            white-space: pre-wrap;
-            overflow-wrap: break-word;
-            margin-top: 10px;
+        .loading-text {
+            color:#64748b; font-weight:500; font-size:14px;
+        }
+        @keyframes spin { 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
+        .alert { border-radius:12px; padding:16px; margin:12px 0; border:1px solid; }
+        .alert-error {
+            background:linear-gradient(135deg,#fef2f2 0%,#fee2e2 100%);
+            color:#dc2626; border-color:rgba(220,38,38,0.2);
+        }
+        .alert-success {
+            background:linear-gradient(135deg,#f0fdf4 0%,#dcfce7 100%);
+            color:#166534; border-color:rgba(22,101,52,0.2);
+        }
+        .welcome-message {
+            text-align:center; padding:30px 20px;
+            background:linear-gradient(135deg,#ffffff 0%,#f8fafc 100%);
+            border-radius:16px; border:1px solid rgba(226,232,240,0.6);
+        }
+        .welcome-message i {
+            font-size:40px; color:#3b82f6; margin-bottom:16px;
+            animation:pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%,100%{transform:scale(1);opacity:1;} 50%{transform:scale(1.05);opacity:0.8;}
+        }
+        .search-suggestions {
+            display:flex; flex-wrap:wrap; gap:8px; margin-top:16px;
+            justify-content:center;
+        }
+        .suggestion-tag {
+            padding:8px 14px; background:linear-gradient(135deg,#dbeafe,#bfdbfe);
+            color:#1e40af; border:1px solid rgba(30,64,175,0.1);
+            border-radius:16px; font-size:13px; cursor:pointer; transition:all 0.3s ease;
+        }
+        .suggestion-tag:hover {
+            transform:translateY(-2px);
+            box-shadow:0 4px 12px rgba(59,130,246,0.15);
+            background:linear-gradient(135deg,#bfdbfe,#93c5fd);
+        }
+        @media(max-width:768px){
+            body{padding:10px;}
+            .chat-container{width:100%;height:95vh;border-radius:16px;}
+        }
+        @media(max-width:480px){
+            .chat-header{font-size:18px;padding:16px;}
+        }
+        /* 페이드 트랜지션용 */
+        .fade {
+          transition: opacity 0.5s ease;
+        }
+        .hidden {
+          opacity: 0;
+        }
+        .visible {
+          opacity: 1;
         }
     </style>
 </head>
 
 <body>
     <div class="chat-container">
-        <div class="chat-header">💬 오너클랜 ChatBot</div>
-        <div class="chat-messages" id="chat-messages"></div>
-        <div id="loading-spinner" class="loading-spinner"></div>
-        <div class="chat-input">
-            <input type="text" id="user-input" placeholder="핵심 키워드를 입력하시면 정확한 검색이 됩니다." onkeypress="handleKeyPress(event)">
-            <button onclick="sendMessage()">전송</button>
-            <button onclick="resetChat()">리셋</button>
+        <div class="chat-header">
+            <i class="fas fa-robot"></i> ChatMall AI 쇼핑 어시스턴트
         </div>
-        <div class="chat-messages" id="json-results"></div>
+        <div class="chat-messages" id="chat-messages">
+            <div class="message bot">
+                <div class="welcome-message">
+                    <i class="fas fa-shopping-cart"></i>
+                    <h3>안녕하세요! 👋</h3>
+                    <p>ChatMall의 스마트 AI 쇼핑 어시스턴트입니다!</p>
+                    <p>원하는 상품을 자연어로 설명해주세요. 예를 들어:</p>
+                    <div class="search-suggestions">
+                        <span class="suggestion-tag" onclick="searchSuggestion('남성 향수')">
+                            <i class="fas fa-spray-can"></i> 남성 향수
+                        </span>
+                        <span class="suggestion-tag" onclick="searchSuggestion('여성 가방')">
+                            <i class="fas fa-bag-shopping"></i> 여성 가방
+                        </span>
+                        <span class="suggestion-tag" onclick="searchSuggestion('스마트폰')">
+                            <i class="fas fa-mobile-alt"></i> 스마트폰
+                        </span>
+                        <span class="suggestion-tag" onclick="searchSuggestion('운동화')">
+                            <i class="fas fa-running"></i> 운동화
+                        </span>
+                        <span class="suggestion-tag" onclick="searchSuggestion('화장품')">
+                            <i class="fas fa-palette"></i> 화장품
+                        </span>
+                        <span class="suggestion-tag" onclick="searchSuggestion('패션의류')">
+                            <i class="fas fa-tshirt"></i> 패션의류
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="loading-spinner" class="loading-spinner">
+            <div class="spinner"></div>
+            <div class="loading-text">
+                <i class="fas fa-search"></i> AI가 최적의 상품을 찾고 있습니다...
+            </div>
+        </div>
+
+        <div class="chat-input">
+            <div class="input-container">
+                <i class="fas fa-search"></i>
+                <input
+                    type="text"
+                    id="user-input"
+                    placeholder="어떤 상품을 찾고 계시나요? 자연스럽게 말씀해주세요!"
+                    onkeydown="handleKeyPress(event)"
+                >
+            </div>
+            <button id="send-btn" class="btn-primary" onclick="sendMessage()">
+                <i class="fas fa-paper-plane"></i> 검색
+            </button>
+            <button id="reset-btn" class="btn-secondary" onclick="resetChat()">
+                <i class="fas fa-redo"></i> 리셋
+            </button>
+        </div>
     </div>
 
     <script>
-        // JSON 데이터를 HTML 요소로 변환하여 렌더링
-        function renderJsonToHtml(jsonData) {
-            if (typeof jsonData === "object" && jsonData !== null) {
-                let html = "<ul style='list-style: none; padding: 0;'>";
-                for (const key in jsonData) {
-                    if (Object.hasOwn(jsonData, key)) {
-                        const value = jsonData[key];
-                        if (typeof value === "string" && value.startsWith("http") && /\.(jpg|jpeg|png|gif)$/.test(value)) {
-                            html += `<li style="margin-bottom: 10px;"><strong>${key}:</strong><br><img src="${value}" alt="${key}" style="max-width: 200px; border-radius: 10px;"></li>`;
-                        } else if (typeof value === "string") {
-                            html += `<li style="margin-bottom: 10px;"><strong>${key}:</strong> ${value.replace(/\n/g, "<br>")}</li>`;
-                        } else if (typeof value === "object" && value !== null) {
-                            html += `<li style="margin-bottom: 10px;"><strong>${key}:</strong>${renderJsonToHtml(value)}</li>`;
-                        } else {
-                            html += `<li style="margin-bottom: 10px;"><strong>${key}:</strong> ${value}</li>`;
-                        }
-                    }
+        function showWelcome() {
+            const box = document.getElementById('chat-messages');
+            box.innerHTML = `
+              <div class="message bot">
+                <div class="welcome-message">
+                  <i class="fas fa-shopping-cart"></i>
+                  <h3>안녕하세요! 👋</h3>
+                  <p>ChatMall의 스마트 AI 쇼핑 어시스턴트입니다!</p>
+                  <p>원하는 상품을 자연어로 설명해주세요. 예를 들어:</p>
+                  <div class="search-suggestions">
+                    <span class="suggestion-tag" onclick="searchSuggestion('남성 향수')">
+                      <i class="fas fa-spray-can"></i> 남성 향수
+                    </span>
+                    <span class="suggestion-tag" onclick="searchSuggestion('여성 가방')">
+                      <i class="fas fa-bag-shopping"></i> 여성 가방
+                    </span>
+                    <span class="suggestion-tag" onclick="searchSuggestion('스마트폰')">
+                      <i class="fas fa-mobile-alt"></i> 스마트폰
+                    </span>
+                    <span class="suggestion-tag" onclick="searchSuggestion('운동화')">
+                      <i class="fas fa-running"></i> 운동화
+                    </span>
+                    <span class="suggestion-tag" onclick="searchSuggestion('화장품')">
+                      <i class="fas fa-palette"></i> 화장품
+                    </span>
+                    <span class="suggestion-tag" onclick="searchSuggestion('패션의류')">
+                      <i class="fas fa-tshirt"></i> 패션의류
+                    </span>
+                  </div>
+                </div>
+              </div>
+            `;
+          }
+
+        
+        const sessionId = 'session_' + Math.random().toString(36).substr(2,9);
+        let isLoading = false;
+        const sliders = {};
+
+        function initSlider(id,count){
+            sliders[id]={idx:0,count};
+        }
+        function updateSlider(id){
+            const wr=document.querySelector(`#${id} .slides-wrapper`);
+            const {idx} = sliders[id];
+            const cardW = wr.children[0].offsetWidth + 20;
+            wr.style.transform = `translateX(${-idx*cardW}px)`;
+        }
+        function prevSlide(id){ if(!sliders[id])return; sliders[id].idx=Math.max(0,sliders[id].idx-1); updateSlider(id); }
+        function nextSlide(id){ if(!sliders[id])return; sliders[id].idx=Math.min(sliders[id].count-1,sliders[id].idx+1); updateSlider(id); }
+
+        function handleKeyPress(e){
+            if(e.key==='Enter' && !isLoading) sendMessage();
+        }
+        function searchSuggestion(q){
+            document.getElementById('user-input').value=q;
+            sendMessage();
+        }
+        function setLoading(l){
+            isLoading=l;
+            document.getElementById('send-btn').disabled=l;
+            document.getElementById('reset-btn').disabled=l;
+            document.getElementById('user-input').disabled=l;
+            document.getElementById('loading-spinner').style.display=l?'block':'none';
+        }
+        function addMessage(html,isUser=false){
+            const box=document.getElementById('chat-messages');
+            const div=document.createElement('div');
+            div.className=`message ${isUser?'user':'bot'}`;
+            div.innerHTML=html;
+            box.appendChild(div);
+            setTimeout(()=>box.scrollTop=box.scrollHeight,100);
+        }
+        function formatPrice(p){
+            const n=Number(p)||0; return n.toLocaleString('ko-KR');
+        }
+        function createProductCard(prod){
+            const price=formatPrice(prod.가격);
+            const free=prod.배송비==0?
+              '<span class="badge badge-shipping"><i class="fas fa-truck"></i> 무료배송</span>':'';
+            return `
+            <div class="product-card">
+              <div class="product-image-container">
+                ${prod.이미지&&prod.이미지!=='이미지 없음'
+                  ? `<img src="${prod.이미지}" class="product-image"
+                        onerror="this.parentElement.innerHTML=
+                          '<div class=\'product-image-placeholder\'>
+                              <i class=\'fas fa-image\'></i>
+                           </div>'">`
+                  : `<div class="product-image-placeholder"><i class="fas fa-image"></i></div>`
                 }
-                html += "</ul>";
-                return html;
-            }
-            return `<span>${jsonData}</span>`;
+              </div>
+              <div class="product-title">${prod.제목||'제목 없음'}</div>
+              <div class="badge badge-category"><i class="fas fa-tags"></i> ${prod.카테고리||'기타'}</div>
+              ${free}
+              <div class="product-info"><i class="fas fa-won-sign"></i> ${price}원</div>
+              <div class="product-info"><i class="fas fa-truck"></i> 배송비: ${formatPrice(prod.배송비)}원</div>
+              <div class="product-info"><i class="fas fa-barcode"></i> 상품코드: ${prod.상품코드}</div>
+              <div class="product-info"><i class="fas fa-globe-asia"></i> 원산지: ${prod.원산지}</div>
+              <div class="product-info"><i class="fas fa-cogs"></i> 옵션: ${prod.옵션}</div>
+              <div class="product-info"><i class="fas fa-boxes"></i> 최대구매수량: ${prod.최대구매수량}개</div>
+              <a href="${prod.상품링크}" target="_blank" class="product-link">
+                <i class="fas fa-external-link-alt"></i> 상품 상세보기
+              </a>
+            </div>`;
         }
 
-        // 엔터 키로 메시지 전송 가능
-        function handleKeyPress(event) {
-            if (event.key === "Enter") {
-                sendMessage();
-            }
-        }
-
-        async function sendMessage() {
-            const userInput = document.getElementById('user-input').value.trim();
-            if (!userInput) {
-                alert("질문을 입력해주세요!");
-                return;
-            }
-
-            const messageBox = document.getElementById('chat-messages');
-            const jsonBox = document.getElementById('json-results');
-            const spinner = document.getElementById('loading-spinner'); // 로딩 스피너
-
-            messageBox.innerHTML += `<div class="message user">👤 ${userInput}</div>`;
-            document.getElementById('user-input').value = '';
-            spinner.style.display = 'block'; // 로딩 애니메이션 표시
-
-            try {
-                const host = window.location.hostname === "localhost"
-                    ? "http://localhost:5050"
-                    : "https://satyr-inviting-quetzal.ngrok-free.app";
-
-                const response = await fetch(`${host}/chatbot`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: userInput })
+        async function sendMessage(){
+            const inp=document.getElementById('user-input');
+            const q=inp.value.trim();
+            if(!q||isLoading) return;
+            addMessage(`<i class="fas fa-user"></i> ${q}`,true);
+            inp.value=''; setLoading(true);
+            try{
+                const res=await fetch('/debug-search',{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({query:q,session_id:sessionId})
                 });
-
-                const data = await response.json();
-
-                jsonBox.innerHTML = `<div class="message bot"><pre>${JSON.stringify(data, null, 2)}</pre></div>`;
-
-                if (data.results && data.results.length > 0) {
-                    data.results.forEach(item => {
-                        messageBox.innerHTML += `
-                            <div class="message bot">
-                                <strong>상품코드:</strong> ${item.상품코드}<br>
-                                <strong>제목:</strong> ${item.제목}<br>
-                                <strong>가격:</strong> ${item.가격}원<br>
-                                <strong>배송비:</strong> ${item.배송비}원<br>
-                                <strong>원산지:</strong> ${item.원산지}<br>
-                                <img src="${item.이미지}" alt="상품 이미지" style="width: 150px; border-radius: 10px;">
-                            </div>`;
-                    });
+                const data=await res.json();
+                if(data.combined_message_text){
+                    addMessage(`<i class="fas fa-robot"></i> ${data.combined_message_text}`);
+                }
+                if(Array.isArray(data.results)&&data.results.length){
+                    const sid=`slider-${Date.now()}`;
+                    const slides=data.results.map(p=>createProductCard(p)).join('');
+                    const html=`
+                    <div class="slider-container" id="${sid}">
+                      <button class="slider-btn prev" onclick="prevSlide('${sid}')">&lt;</button>
+                      <div class="slides-wrapper">${slides}</div>
+                      <button class="slider-btn next" onclick="nextSlide('${sid}')">&gt;</button>
+                    </div>`;
+                    addMessage(html,false);
+                    initSlider(sid,data.results.length);
                 } else {
-                    messageBox.innerHTML += `<div class="message bot">❗ 검색 결과가 없습니다.</div>`;
+                    addMessage(`<div class="alert alert-error"><i class="fas fa-exclamation-triangle"></i> 검색 결과가 없습니다.</div>`);
                 }
-
-                const prettyHtml = renderJsonToHtml(data.response);
-                messageBox.innerHTML += `<div class="message bot"><strong>💡 챗봇 응답:</strong> ${prettyHtml}</div>`;
-            } catch (error) {
-                console.error("에러 발생:", error);
-                messageBox.innerHTML += `<div class="message bot">❗ 서버 연결 오류</div>`;
+            } catch(e){
+                addMessage(`<div class="alert alert-error"><i class="fas fa-exclamation-circle"></i> 서버 연결 오류</div>`);
             } finally {
-                spinner.style.display = 'none'; // 로딩 애니메이션 숨기기
-            }
-
-            messageBox.scrollTop = messageBox.scrollHeight;
-        }
-
-        async function resetChat() {
-            const messageBox = document.getElementById('chat-messages');
-            const jsonBox = document.getElementById('json-results');
-            const spinner = document.getElementById('loading-spinner'); // 로딩 스피너
-            const host = window.location.hostname === "localhost"
-                ? "http://localhost:5050"
-                : "https://satyr-inviting-quetzal.ngrok-free.app";
-
-            spinner.style.display = 'block'; // 로딩 애니메이션 표시
-            try {
-                const response = await fetch(`${host}/chatbot`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: "reset" })
-                });
-
-                const data = await response.json();
-
-                messageBox.innerHTML = `<div class="message bot">✅ ${data.message}</div>`;
-                jsonBox.innerHTML = '';
-                document.getElementById('user-input').value = '';
-            } catch (error) {
-                console.error("리셋 오류:", error);
-                messageBox.innerHTML += `<div class="message bot">❗ 리셋 요청 실패</div>`;
-            } finally {
-                spinner.style.display = 'none'; // 로딩 애니메이션 숨기기
+                setLoading(false);
             }
         }
+        
+        
+        // 타이머와 콜백을 위로 분리
+        const RESET_DELAY = 3000;
+        function onResetComplete() {
+            showWelcome();
+            const box = document.getElementById('chat-messages');
+            box.classList.remove('hidden');
+            box.classList.add('visible');
+        }
+        
+        async function resetChat(){
+          if (isLoading) return;
+          setLoading(true);
+          try {
+            await fetch('/debug-search', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: 'reset', session_id: sessionId })
+            });
+                      
+            //  페이드 아웃
+            const box = document.getElementById('chat-messages');
+            box.classList.add('fade', 'hidden');
+
+              
+            //  타이머는 밖에서 정의된 onResetComplete 호출
+            setTimeout(onResetComplete, RESET_DELAY);
+
+              
+        
+          } catch (e) {
+            addMessage(`
+              <div class="alert alert-error">
+                <i class="fas fa-exclamation-circle"></i> 리셋 오류
+              </div>
+            `);
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        window.addEventListener('load', () => {
+            showWelcome();
+            document.getElementById('user-input').focus();
+        });
     </script>
 </body>
 
