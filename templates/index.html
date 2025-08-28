@@ -380,6 +380,7 @@
         function formatPrice(p){
             const n=Number(p)||0; return n.toLocaleString('ko-KR');
         }
+        
         function createProductCard(prod){
             const price=formatPrice(prod.가격);
             const free=prod.배송비==0?
